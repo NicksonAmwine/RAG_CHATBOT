@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  rag-chatbot:
+    build: .
+    container_name: rag_chatbot
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./chroma_db:/app/chroma_db
+      - ./war_and_peace.txt:/app/war_and_peace.txt
+      - ./uploaded_documents:/app/uploaded_documents
+      - .:/app  
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+    env_file:
+      - chatbot.env
+    restart: unless-stopped
