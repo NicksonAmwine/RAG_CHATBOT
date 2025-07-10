@@ -14,10 +14,6 @@ This RAG system enables users to:
 ### Chosen Document
 The system comes pre-configured with Leo Tolstoy's "War and Peace" as the default document for demonstration purposes.
 
-## Application Architecture
-┌─────────────────┐ ┌──────────────────┐ ┌─────────────────┐ │ Streamlit UI │ │ LangChain │ │ ChromaDB │ │ (Frontend) │◄──►│ (Processing) │◄──►│ (Vector DB) │ └─────────────────┘ └──────────────────┘ └─────────────────┘ │ │ │ │ │ │ ▼ ▼ ▼ ┌─────────────────┐ ┌──────────────────┐ ┌─────────────────┐ │ User Interface │ │ Document │ │ Embeddings │ │ - Chat Interface│ │ Processing │ │ Storage │ │ - File Upload │ │ - Chunking │ │ - Similarity │ │ - Document Mgmt │ │ - Embedding │ │ Search │ └─────────────────┘ └──────────────────┘ └─────────────────┘ │ ▼ ┌──────────────────┐ │ Google Gemini │ │ (LLM & Embed) │ └──────────────────┘
-
-
 ### Component Interactions:
 
 1. **Streamlit**: Provides the web interface and handles user interactions
@@ -56,7 +52,7 @@ The system comes pre-configured with Leo Tolstoy's "War and Peace" as the defaul
 
 ### 1. Clone the Repository
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/NicksonAmwine/RAG_CHATBOT.git
 cd AFTA_chatbot
 ```
 
