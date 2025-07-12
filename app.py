@@ -84,7 +84,7 @@ def handle_user_query(user_query, similarity_search_func, generate_answer_func):
     with st.spinner("🔍 Searching..."):
         # Retrieve relevant chunks
         if st.session_state.collection is not None:
-            retrieved_docs = similarity_search_func(st.session_state.collection, user_query, k=3)
+            retrieved_docs = similarity_search_func(st.session_state.collection, user_query, k=8)
             
             if retrieved_docs:
                 context = "\n\n".join(retrieved_docs)

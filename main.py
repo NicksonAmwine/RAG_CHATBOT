@@ -15,7 +15,11 @@ from typing import List
 from langchain.memory import ConversationBufferMemory
 
 config = dotenv_values("chatbot.env")
-gemini_api_key = config["GOOGLE_API_KEY"]
+gemini_api_key = config.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+if not gemini_api_key:
+    st.error("GOOGLE_API_KEY not found! Please check your chatbot.env file.")
+    st.stop()
 
 # Initialize embeddings
 embeddings = GoogleGenerativeAIEmbeddings(
@@ -114,10 +118,9 @@ def create_or_load_vector_store(chunk_documents=None, document_name=None) -> chr
         return collection
         
     except Exception as e:
-        st.error(f"Error creating vector store: {str(e)}")
         raise RuntimeError(f"Error creating vector store: {str(e)}")
 
-def similarity_search(collection: chromadb.Collection, query: str, k: int = 5) -> List[str]:
+def similarity_search(collection: chromadb.Collection, query: str, k: int = 8) -> List[str]:
     """Search for similar documents in the vector store."""
     try:
         # Generate query embedding
@@ -126,7 +129,8 @@ def similarity_search(collection: chromadb.Collection, query: str, k: int = 5) -
         # Search in ChromaDB
         results = collection.query(
             query_embeddings=[query_embedding],
-            n_results=k
+            n_results=k,
+            include=['documents', 'metadatas', 'distances']
         )
         
         return results['documents'][0] if results['documents'] else []
@@ -137,30 +141,49 @@ def similarity_search(collection: chromadb.Collection, query: str, k: int = 5) -
 
 def generate_answer(context: str, question: str,) -> str:
     """Generate answer using LLM with retrieved context."""
+
+    # Get conversation history
+    try:
+        memory_vars = st.session_state.memory.load_memory_variables({})
+        history = memory_vars.get("history", [])
+        
+        # Format history for the prompt
+        history_str = ""
+        if history:
+            history_str = "\n".join([
+                f"Human: {msg.content}" if hasattr(msg, 'type') and msg.type == 'human' 
+                else f"Assistant: {msg.content}" if hasattr(msg, 'content') 
+                else str(msg) for msg in history[-6:]
+            ])
+    except:
+        history_str = ""
     prompt_template = ChatPromptTemplate.from_template("""
     You are an expert assistant answering questions about uploaded documents."
     Use the following context from the uploaded documents to provide a detailed and accurate answer. Try to be concise and relevant.
-    If the context doesn't contain relevant information, say so clearly.
+    You can derive deductions from the provided context to answer questions but try to stay within the context for the document. Make the conversation to flow naturally and try not to sound like a robot.
 
     Conversation History:
     {history}
 
-    Context:
+    Document context:
     {context}
 
     Question:
     {question}
 
-    Answer:
+    Answer based on the context above
     """)
     
     try:
         # Get chat history from memory
-        history = st.session_state.memory.load_memory_variables({})["history"]
-        history_str = "\n".join([f"{'User' if msg.type == 'user' else 'Bot'}: {msg.content}" for msg in history])
-        prompt = prompt_template.format(context=context, question=question, history=history_str)
+        prompt = prompt_template.format(
+            context=context, 
+            question=question, 
+            history=history_str
+        )
         response = llm.invoke([HumanMessage(content=prompt)])
         
+        # Save to memory
         st.session_state.memory.save_context(
             {"user": question},
             {"bot": response.content}
