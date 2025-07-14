@@ -7,4 +7,5 @@ chromadb
 python-dotenv
 numpy
 pydantic
+PyPDF2==3.0.1
 chunking_evaluation @ git+https://github.com/brandonstarxel/chunking_evaluation.git@d451fc4cf56e417b755994b4ca5212fd5057c0d2

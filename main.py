@@ -10,9 +10,9 @@ import uuid
 import numpy as np
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from pydantic import SecretStr
-import os
-from typing import List
-from langchain.memory import ConversationBufferMemory
+import os, io, PyPDF2
+from typing import List, Optional
+from langchain.memory import ConversationBufferWindowMemory
 
 config = dotenv_values("chatbot.env")
 gemini_api_key = config.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -37,10 +37,50 @@ llm = ChatGoogleGenerativeAI(
 chroma_client = chromadb.PersistentClient(path="/app/chroma_db")
 
 if "memory" not in st.session_state:
-    st.session_state.memory = ConversationBufferMemory(return_messages=True)
+    st.session_state.memory = ConversationBufferWindowMemory(
+        k=5,
+        return_messages=True,
+        memory_key="chat_history"
+        )
 
-st.title("MY RAG CHATBOT")
-st.subheader("Document Querying System")
+
+st.markdown("""
+<div class="custom-header">
+    <h1>🤖 Intelligent Document Assistant</h1>
+    <p>Upload documents and chat with AI-powered insights • Powered by Google Gemini</p>
+</div>
+""", 
+unsafe_allow_html=True)
+
+def extract_text_from_pdf(uploaded_file) -> str:
+    """Extract text from uploaded PDF file."""
+    try:
+        # Reset file pointer
+        uploaded_file.seek(0)
+        
+        # Create PDF reader
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(uploaded_file.read()))
+        
+        # Extract text from all pages
+        text = ""
+        for page_num, page in enumerate(pdf_reader.pages):
+            try:
+                page_text = page.extract_text()
+                if page_text.strip():  # Only add non-empty pages
+                    text += f"\n--- Page {page_num + 1} ---\n"
+                    text += page_text + "\n"
+            except Exception as e:
+                st.warning(f"Could not extract text from page {page_num + 1}: {e}")
+                continue
+        
+        if not text.strip():
+            raise Exception("No text could be extracted from the PDF")
+            
+        return text.strip()
+        
+    except Exception as e:
+        st.error(f"Error extracting text from PDF: {str(e)}")
+        return ""
 
 def load_document(file_path: str) -> str:
     """Load document from file path."""
@@ -63,7 +103,7 @@ def chunk_document(text: str) -> List[Document]:
     text_splitter = RecursiveTokenChunker(
         chunk_size=3000,
         chunk_overlap=50,
-        separators=["\n\n", "\n", " ", ""],
+        separators=["\n\n", "\n", ".", "?"],
     )
     
     chunks = text_splitter.split_text(text)
@@ -80,23 +120,37 @@ def chunk_document(text: str) -> List[Document]:
         chunk_documents.append(chunk_doc)
     return chunk_documents
 
-def create_or_load_vector_store(chunk_documents=None, document_name=None) -> chromadb.Collection:
-    """Create or load ChromaDB vector store"""
+def create_or_load_vector_store(chunk_documents=None, document_name=None) -> Optional[chromadb.Collection]:
+    """Create or load ChromaDB vector store, considering the document name."""
     try:
+        # If no document name provided, return None
+        if document_name is None:
+            st.error("Document name is required")
+            return None
+            
+        # Check if collection exists and matches document_name
         try:
             collection = chroma_client.get_collection(name="chunked_documents")
-            # Check if the existing collection matches the document name
-            if collection.count() > 0 and st.session_state.get('current_document') == document_name:
+            collection_metadata = collection.metadata or {}
+            stored_doc_name = collection_metadata.get("document_name")
+            
+            if collection.count() > 0 and stored_doc_name == document_name:
+                # st.sidebar.info(f"✅ Reusing existing collection for: {document_name}")
                 return collection 
-            else:
+            elif collection.count() > 0 and stored_doc_name != document_name:
+                # st.sidebar.info(f"🔄 Replacing collection (was: {stored_doc_name}, now: {document_name})")
                 chroma_client.delete_collection(name="chunked_documents")
         except:
-            pass 
+            st.sidebar.info(f"📝 Creating new collection for: {document_name}")
+            pass  
         
         if chunk_documents is None:
-            raise ValueError("No chunk documents provided for new collection")
+            return None
         
-        collection = chroma_client.create_collection(name="chunked_documents")
+        collection = chroma_client.create_collection(
+            name="chunked_documents",
+            metadata={"document_name": document_name}
+        )
         
         # Generate embeddings for all chunks
         texts = [chunk.page_content for chunk in chunk_documents]
@@ -115,11 +169,13 @@ def create_or_load_vector_store(chunk_documents=None, document_name=None) -> chr
             ids=ids
         )
         
+        st.sidebar.success(f"✅ Created collection with {len(texts)} chunks")
         return collection
         
     except Exception as e:
-        raise RuntimeError(f"Error creating vector store: {str(e)}")
-
+        st.error(f"Error creating vector store: {str(e)}")
+        return None
+    
 def similarity_search(collection: chromadb.Collection, query: str, k: int = 8) -> List[str]:
     """Search for similar documents in the vector store."""
     try:
@@ -145,22 +201,28 @@ def generate_answer(context: str, question: str,) -> str:
     # Get conversation history
     try:
         memory_vars = st.session_state.memory.load_memory_variables({})
-        history = memory_vars.get("history", [])
+        history = memory_vars.get("chat_history", [])
         
         # Format history for the prompt
         history_str = ""
         if history:
-            history_str = "\n".join([
-                f"Human: {msg.content}" if hasattr(msg, 'type') and msg.type == 'human' 
-                else f"Assistant: {msg.content}" if hasattr(msg, 'content') 
-                else str(msg) for msg in history[-6:]
-            ])
+            formatted_messages = []
+            for msg in history:
+                if hasattr(msg, 'type'):
+                    if msg.type == 'human':
+                        formatted_messages.append(f"Human: {msg.content}")
+                    elif msg.type == 'ai':
+                        formatted_messages.append(f"Assistant: {msg.content}")
+                elif hasattr(msg, 'content'):
+                    formatted_messages.append(f"Message: {msg.content}")
+            
+            history_str = "\n".join(formatted_messages)
     except:
         history_str = ""
     prompt_template = ChatPromptTemplate.from_template("""
     You are an expert assistant answering questions about uploaded documents."
     Use the following context from the uploaded documents to provide a detailed and accurate answer. Try to be concise and relevant.
-    You can derive deductions from the provided context to answer questions but try to stay within the context for the document. Make the conversation to flow naturally and try not to sound like a robot.
+    You can derive deductions from the provided context to answer questions but be sure to stay within the context of the document. Make the conversation flow naturally and try not to sound like a robot.
 
     Conversation History:
     {history}
@@ -185,8 +247,8 @@ def generate_answer(context: str, question: str,) -> str:
         
         # Save to memory
         st.session_state.memory.save_context(
-            {"user": question},
-            {"bot": response.content}
+            {"input": question},
+            {"output": response.content}
         )
         if isinstance(response.content, str):
             return response.content
@@ -201,19 +263,36 @@ def generate_answer(context: str, question: str,) -> str:
 def process_uploaded_file(uploaded_file) -> bool:
     """Process uploaded text file and update vector store."""
     try:
-        # Read uploaded file
-        text = str(uploaded_file.read(), "utf-8")
+        if uploaded_file.name.endswith('.pdf'):
+            text = extract_text_from_pdf(uploaded_file)
+            if not text:
+                st.error("Could not extract text from PDF file")
+                return False
+        elif uploaded_file.name.endswith('.txt'):
+            # Read text file
+            uploaded_file.seek(0)
+            text = str(uploaded_file.read(), "utf-8")
+        else:
+            st.error("Unsupported file type")
+            return False
+        
+        if not text.strip():
+            st.error("Document appears to be empty")
+            return False
         
         # Save to temporary file
         os.makedirs("/app/uploaded_documents", exist_ok=True)
-        with open(f"/app/uploaded_documents/{uploaded_file.name}", "w", encoding="utf-8") as f:
+        base_name = os.path.splitext(uploaded_file.name)[0]
+        save_path = f"/app/uploaded_documents/{base_name}.txt"
+        
+        with open(save_path, "w", encoding="utf-8") as f:
             f.write(text)
         
         # Process the document
         chunk_documents = chunk_document(text)
         
         # Create new vector store
-        collection = create_or_load_vector_store(chunk_documents)
+        collection = create_or_load_vector_store(chunk_documents, document_name=uploaded_file.name)
         
         if collection:
             st.session_state.collection = collection
@@ -236,58 +315,114 @@ if "collection" not in st.session_state:
     st.session_state.document_processed = False
     st.session_state.current_document = "war_and_peace.txt"
 
+if not st.session_state.document_processed:
+    try:
+        collection = chroma_client.get_collection(name="chunked_documents")
+        collection_metadata = collection.metadata or {}
+        stored_doc_name = collection_metadata.get("document_name", "war_and_peace.txt")
+        if collection.count() > 0:
+            st.session_state.collection = collection
+            st.session_state.document_processed = True
+            st.session_state.current_document = stored_doc_name
+            st.sidebar.success(f"Auto-loaded: {stored_doc_name}")
+    except:
+        pass
+
 # Sidebar for document processing
 with st.sidebar:
-    st.header("Document Management")
+    st.markdown("""
+    <div style="text-align: center; margin-bottom: 1rem;">
+        <h1 style="color: white; margin: 0;">Document Manager</h1>
+    </div>
+    """, unsafe_allow_html=True)
     
     # Default document processing
-    if st.button("Process War and Peace"):
+    st.markdown("### 📖 Default Document")
+    if st.button("✨ Process War and Peace", use_container_width=True):
         with st.spinner("Processing War and Peace..."):
-            try:
-                collection = create_or_load_vector_store()
-                if collection.count() > 0:
-                    st.session_state.collection = collection
-                    st.session_state.document_processed = True
-                    st.session_state.current_document = "war_and_peace.txt"
-                    st.success("Existing document loaded successfully!")
-                else:
-                    text = load_document("war_and_peace.txt")
-                    if text:
-                        chunk_documents = chunk_document(text)
-                        st.info(f"Created {len(chunk_documents)} chunks")
-                        
-                        collection = create_or_load_vector_store(chunk_documents)
-                        if collection:
-                            st.session_state.collection = collection
-                            st.session_state.document_processed = True
-                            st.session_state.current_document = "war_and_peace.txt"
-                            st.success("Document processed successfully!")
-            except:
+            collection = create_or_load_vector_store(document_name="war_and_peace.txt")
+            if collection and collection.count() > 0:
+                st.session_state.collection = collection
+                st.session_state.document_processed = True
+                st.session_state.current_document = "war_and_peace.txt"
+                st.success("Existing document loaded successfully!")
+            else:
                 text = load_document("war_and_peace.txt")
                 if text:
                     chunk_documents = chunk_document(text)
                     st.info(f"Created {len(chunk_documents)} chunks")
                     
-                    collection = create_or_load_vector_store(chunk_documents)
+                    collection = create_or_load_vector_store(chunk_documents, "war_and_peace.txt")
                     if collection:
                         st.session_state.collection = collection
                         st.session_state.document_processed = True
                         st.session_state.current_document = "war_and_peace.txt"
                         st.success("Document processed successfully!")
-    
+                    else:
+                        st.error("Failed to create vector store.")
+                else:
+                    st.error("Failed to load War and Peace document.")
+
     # File upload option
-    st.subheader("Upload Your Own Document")
-    uploaded_file = st.file_uploader("Choose a text file", type="txt")
-    
+    st.markdown("### 📤 Upload Custom Document")
+    uploaded_file = st.file_uploader("Choose a text or PDF file", type=["txt", "pdf"], label_visibility="collapsed")
+
     if uploaded_file is not None:
-        if st.button("Process Uploaded Document"):
+        uploaded_file.seek(0)
+        if st.button("✨ Process Uploaded Document", use_container_width=True):
             with st.spinner("Processing uploaded document..."):
                 if process_uploaded_file(uploaded_file):
                     st.success("Uploaded document processed successfully!")
-    
-    # Display current document
-    if st.session_state.document_processed:
-        st.info(f"Current document: {st.session_state.current_document}")
-        st.info(f"Status: Ready for queries")
+                else:
+                    st.error("Failed to process uploaded document")
 
-render_chat_interface(similarity_search, generate_answer)
+    if st.session_state.document_processed:
+        st.markdown(f"""
+        <div class="metric-card">
+            <p>📄 Current Document: <span style="color: green;">{st.session_state.current_document}</span></p>
+            <p>📊 {st.session_state.collection.count() if st.session_state.collection else 0:,} chunks available</p>
+            <p>Status: <span style="color: green;">Ready</span></p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div class="metric-card">
+            <h4>⚠️ No Document Loaded</h4>
+            <p>Process a document below to get started</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+def handle_user_query(user_query):
+    """Handle user query submission."""
+    with st.spinner("🔍 Processing your question..."):
+        if st.session_state.collection is not None:
+            retrieved_docs = similarity_search(st.session_state.collection, user_query, k=8)
+            
+            if retrieved_docs:
+                context = "\n\n".join(retrieved_docs)
+                answer = generate_answer(context, user_query)
+                
+                # Store in chat history
+                st.session_state.chat_history.append({
+                    "human": user_query,
+                    "ai": answer,
+                    "context_chunks": len(retrieved_docs)
+                })
+                
+                st.rerun()
+            else:
+                st.error("No relevant information found in the document. Try rephrasing your question.")
+        else:
+            st.error("No document collection found. Please process a document first.")
+
+# Main interface logic
+user_action = render_chat_interface()
+
+if user_action:
+    if user_action["action"] == "submit":
+        handle_user_query(user_action["query"])
+    elif user_action["action"] == "clear":
+        st.session_state.chat_history = []
+        st.session_state.memory.clear()
+        st.success("Chat history cleared!")
+        st.rerun()
